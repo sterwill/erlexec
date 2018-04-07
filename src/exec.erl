@@ -44,7 +44,7 @@
 -export([
     start/0, start/1, start_link/1, run/2, run_link/2, manage/2, send/2, winsz/3,
     which_children/0, kill/2,       setpgid/2, stop/1, stop_and_wait/2,
-    ospid/1, pid/1,   status/1,     signal/1,  debug/1
+    ospid/1, pid/1,   status/1,     signal/1,  debug/1, pause/3
 ]).
 
 %% Internal exports
@@ -480,6 +480,26 @@ winsz(OsPid, Rows, Cols)
        is_integer(Rows),
        is_integer(Cols) ->
     gen_server:call(?MODULE, {port, {winsz, OsPid, Rows, Cols}}).
+
+%%-------------------------------------------------------------------------
+%% @doc Pause or unpause the handling of `Stream' for the OS process identified by `OsPid'.
+%%
+%% When a stream is paused, no data is read from or written to it.  For
+%% `stdout' and `stderr', the process will block when the operating system's
+%% buffer fills up, and unblock when the stream is unpaused.  For `stdin',
+%% data sent to the process will be queued in memory until the stream is unpaused
+%% (this is rarely useful; it is better to simply not send the data).
+%%
+%% Data that is queued while a stream is paused will be lost if the process exits
+%% before the stream is unpaused.
+%% @end
+%%-------------------------------------------------------------------------
+-spec pause(OsPid :: ospid() | pid(), Stream :: stdin | stdout | stderr, Paused :: boolean()) -> ok.
+pause(OsPid, Stream, Paused)
+    when (is_integer(OsPid) orelse is_pid(OsPid)),
+    is_atom(Stream),
+    is_boolean(Paused) ->
+    gen_server:call(?MODULE, {port, {pause, OsPid, Stream, Paused}}).
 
 %%-------------------------------------------------------------------------
 %% @doc Set debug level of the port process.
@@ -1009,7 +1029,16 @@ is_port_command({winsz, Pid, Rows, Cols}, _Pid, _State)
 is_port_command({winsz, OsPid, Rows, Cols}, _Pid, _State)
   when is_integer(OsPid), is_integer(Rows), is_integer(Cols) ->
     {ok, {winsz, OsPid, Rows, Cols}};
-is_port_command({kill, OsPid, Sig}=T, _Pid, _State) when is_integer(OsPid),is_integer(Sig) -> 
+is_port_command({pause, Pid, Stream, Paused}, _Pid, _State)
+    when is_pid(Pid), is_atom(Stream), is_boolean(Paused) ->
+    case ets:lookup(exec_mon, Pid) of
+        [{Pid, OsPid}]  -> {ok, {pause, OsPid, Stream, Paused}};
+        []              -> throw({error, no_process})
+    end;
+is_port_command({pause, OsPid, Stream, Paused}, _Pid, _State)
+    when is_integer(OsPid), is_atom(Stream), is_boolean(Paused) ->
+    {ok, {pause, OsPid, Stream, Paused}};
+is_port_command({kill, OsPid, Sig}=T, _Pid, _State) when is_integer(OsPid),is_integer(Sig) ->
     {ok, T, undefined, undefined, []};
 is_port_command({setpgid, OsPid, Gid}=T, _Pid, _State) when is_integer(OsPid),is_integer(Gid) -> 
     {ok, T, undefined, undefined, []};
@@ -1136,6 +1165,9 @@ exec_test_() ->
             ?tt(test_monitor()),
             ?tt(test_sync()),
             ?tt(test_winsz()),
+            ?tt(test_pause_stdin()),
+            ?tt(test_pause_stdout()),
+            ?tt(test_pause_stderr()),
             ?tt(test_stdin()),
             ?tt(test_stdin_eof()),
             ?tt(test_std(stdout)),
@@ -1170,6 +1202,40 @@ test_winsz() ->
     ok = exec:winsz(I, 99, 88),
     ok = exec:send(I, <<"\n">>),
     ?receiveMatch({stdout, I, <<"LINES=99 COLUMNS=88\r\n">>}, 3000),
+    ?receiveMatch({'DOWN', _, process, P, normal}, 5000).
+
+test_pause_stdin() ->
+    {ok, P, I} = exec:run(["/bin/bash", "-c", "echo started; read x; echo ok"], [stdin, stdout, monitor]),
+    ?receiveMatch({stdout, I, <<"started\n">>}, 3000),
+    ok = exec:pause(I, stdin, true),
+    ok = exec:send(I, <<"\n">>),
+    ?receiveMatch(timeout, 100),
+    ok = exec:pause(I, stdin, false),
+    ?receiveMatch({stdout, I, <<"ok\n">>}, 3000),
+    ?receiveMatch({'DOWN', _, process, P, normal}, 5000).
+
+test_pause_stdout() ->
+    % The final "read" prevents the process from exiting while stdout is paused
+    {ok, P, I} = exec:run(["/bin/bash", "-c", "echo started; read x; echo ok; read x"], [stdin, stdout, monitor]),
+    ?receiveMatch({stdout, I, <<"started\n">>}, 3000),
+    ok = exec:pause(I, stdout, true),
+    ok = exec:send(I, <<"\n">>),
+    ?receiveMatch(timeout, 100),
+    ok = exec:pause(I, stdout, false),
+    ?receiveMatch({stdout, I, <<"ok\n">>}, 3000),
+    ok = exec:send(I, <<"\n">>),
+    ?receiveMatch({'DOWN', _, process, P, normal}, 5000).
+
+test_pause_stderr() ->
+    % The final "read" prevents the process from exiting while stderr is paused
+    {ok, P, I} = exec:run(["/bin/bash", "-c", "echo started >> /dev/stderr; read x; echo ok >> /dev/stderr; read x"], [stdin, stderr, monitor]),
+    ?receiveMatch({stderr, I, <<"started\n">>}, 3000),
+    ok = exec:pause(I, stderr, true),
+    ok = exec:send(I, <<"\n">>),
+    ?receiveMatch(timeout, 100),
+    ok = exec:pause(I, stderr, false),
+    ?receiveMatch({stderr, I, <<"ok\n">>}, 3000),
+    ok = exec:send(I, <<"\n">>),
     ?receiveMatch({'DOWN', _, process, P, normal}, 5000).
 
 test_stdin() ->

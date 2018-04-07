@@ -56,6 +56,14 @@ const char* stream_name(int i) {
 }
 
 //------------------------------------------------------------------------------
+int stream_num(const char * stream_name) {
+    if (strcmp(stream_name, "stdin")  == 0) return STDIN_FILENO;
+    if (strcmp(stream_name, "stdout") == 0) return STDOUT_FILENO;
+    if (strcmp(stream_name, "stderr") == 0) return STDERR_FILENO;
+    return -1;
+}
+
+//------------------------------------------------------------------------------
 // Read details of terminated child from pipe
 //------------------------------------------------------------------------------
 int read_sigchld(pid_t& child)
@@ -117,8 +125,28 @@ bool set_pid_winsz(CmdInfo& ci, int rows, int cols)
 }
 
 //------------------------------------------------------------------------------
+bool set_pid_stream_paused(CmdInfo& ci, int i, bool paused)
+{
+    ci.stream_paused[i] = paused;
+    if (debug)
+        fprintf(stderr, "%s handling of %s for pid %ld\n", paused ? "Paused" : "Unpaused",
+            stream_name(i), ci.cmd_pid);
+
+    // If stdin is being unpaused, write any queued data to the process immediately.
+    // This isn't necessary for stdout and stderr because they will be added to the
+    // set of file descriptors for select in the next loop, but stdin is only added to
+    // that set if there was a partial write from a previous attempt.
+    if (i == STDIN_FILENO && !paused)
+        process_pid_input(ci);
+
+    return true;
+}
+
+//------------------------------------------------------------------------------
 bool process_pid_input(CmdInfo& ci)
 {
+    if (ci.stream_paused[STDIN_FILENO]) return true;
+
     int& fd = ci.stream_fd[STDIN_FILENO];
 
     if (fd < 0) return true;
@@ -164,6 +192,8 @@ void process_pid_output(CmdInfo& ci, int maxsize)
     bool dead = false;
 
     for (int i=STDOUT_FILENO; i <= STDERR_FILENO; i++) {
+        if (ci.stream_paused[i]) continue;
+
         int& fd = ci.stream_fd[i];
 
         if (fd >= 0) {

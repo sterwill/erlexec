@@ -285,8 +285,8 @@ bool process_command()
         return false;
     }
 
-    enum CmdTypeT        {  MANAGE,  RUN,  STOP,  KILL,  LIST,  SHUTDOWN,  STDIN,  DEBUG, WINSZ  } cmd;
-    const char* cmds[] = { "manage","run","stop","kill","list","shutdown","stdin","debug", "winsz" };
+    enum CmdTypeT        {  MANAGE,  RUN,  STOP,  KILL,  LIST,  SHUTDOWN,  STDIN,  DEBUG,  WINSZ,  PAUSE} cmd;
+    const char* cmds[] = { "manage","run","stop","kill","list","shutdown","stdin","debug","winsz","pause" };
 
     /* Determine the command */
     if ((int)(cmd = (CmdTypeT) eis.decodeAtomIndex(cmds, command)) < 0) {
@@ -414,7 +414,26 @@ bool process_command()
             set_pid_winsz(it->second, rows, cols);
             break;
         }
-            
+        case PAUSE: {
+            // {pause, OsPid::integer(), Stream::atom(), Paused::boolean()}
+            long pid;
+            std::string stream;
+            int stream_i;
+            bool paused;
+            if (arity != 4 || eis.decodeInt(pid) < 0 || eis.decodeAtom(stream) < 0 ||
+                    (stream_i = stream_num(stream.c_str())) < 0 || eis.decodeBool(paused) < 0) {
+                send_error_str(transId, true, "badarg");
+                break;
+            }
+            MapChildrenT::iterator it = children.find(pid);
+            if (it == children.end()) {
+                if (debug)
+                    fprintf(stderr, "pid %ld doesn't exist\r\n", pid);
+                break;
+            }
+            set_pid_stream_paused(it->second, stream_i, paused);
+            break;
+        }
         case STDIN: {
             // {stdin, OsPid::integer(), Data::binary()}
             long pid;

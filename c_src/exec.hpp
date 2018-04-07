@@ -147,11 +147,15 @@ std::string fd_type(int tp);
 /// Symbolic name of stdin/stdout/stderr fd stream
 const char* stream_name(int i);
 
+// File descriptor value for a symbolic stream name
+int stream_num(const char * stream_name);
+
 int     read_sigchld(pid_t& child);
 void    check_child_exit(pid_t pid);
 int     set_nice(pid_t pid,int nice, std::string& error);
 bool    process_sigchld();
 bool    set_pid_winsz(CmdInfo& ci, int rows, int cols);
+bool    set_pid_stream_paused(CmdInfo& ci, int i, bool paused);
 bool    process_pid_input(CmdInfo& ci);
 void    process_pid_output(CmdInfo& ci, int maxsize = 4096);
 int     send_ok(int transId, long value = -1);
@@ -328,20 +332,21 @@ public:
 /// structure will contain its run-time information.
 //-------------------------------------------------------------------------
 struct CmdInfo {
-    CmdArgsList     cmd;            // Executed command
-    pid_t           cmd_pid;        // Pid of the custom kill command
-    pid_t           cmd_gid;        // Command's group ID
-    std::string     kill_cmd;       // Kill command to use (default: use SIGTERM)
-    kill_cmd_pid_t  kill_cmd_pid;   // Pid of the command that <pid> is supposed to kill
-    ei::TimeVal     deadline;       // Time when the <cmd_pid> is supposed to be killed using SIGTERM.
-    bool            sigterm;        // <true> if sigterm was issued.
-    bool            sigkill;        // <true> if sigkill was issued.
-    int             kill_timeout;   // Pid shutdown interval in sec before it's killed with SIGKILL
-    bool            kill_group;     // Indicates if at exit the whole group needs to be killed
-    int             success_code;   // Exit code to use on success
-    bool            managed;        // <true> if this pid is started externally, but managed by erlexec
-    int             stream_fd[3];   // Pipe fd getting   process's stdin/stdout/stderr
-    int             stdin_wr_pos;   // Offset of the unwritten portion of the head item of stdin_queue
+    CmdArgsList     cmd;                // Executed command
+    pid_t           cmd_pid;            // Pid of the custom kill command
+    pid_t           cmd_gid;            // Command's group ID
+    std::string     kill_cmd;           // Kill command to use (default: use SIGTERM)
+    kill_cmd_pid_t  kill_cmd_pid;       // Pid of the command that <pid> is supposed to kill
+    ei::TimeVal     deadline;           // Time when the <cmd_pid> is supposed to be killed using SIGTERM.
+    bool            sigterm;            // <true> if sigterm was issued.
+    bool            sigkill;            // <true> if sigkill was issued.
+    int             kill_timeout;       // Pid shutdown interval in sec before it's killed with SIGKILL
+    bool            kill_group;         // Indicates if at exit the whole group needs to be killed
+    int             success_code;       // Exit code to use on success
+    bool            managed;            // <true> if this pid is started externally, but managed by erlexec
+    int             stream_fd[3];       // Pipe fd getting   process's stdin/stdout/stderr
+    bool            stream_paused[3];   // Indicates that handling is paused for the process's stdin/stdout/stderr
+    int             stdin_wr_pos;       // Offset of the unwritten portion of the head item of stdin_queue
     std::list<std::string> stdin_queue;
 
     CmdInfo() {
@@ -379,11 +384,16 @@ struct CmdInfo {
         stream_fd[STDIN_FILENO]  = _stdin_fd;
         stream_fd[STDOUT_FILENO] = _stdout_fd;
         stream_fd[STDERR_FILENO] = _stderr_fd;
+        stream_paused[STDIN_FILENO] = false;
+        stream_paused[STDOUT_FILENO] = false;
+        stream_paused[STDERR_FILENO] = false;
     }
 
     void include_stream_fd(int i, int& maxfd, fd_set* readfds, fd_set* writefds) {
         bool ok;
         fd_set* fds;
+
+        if (stream_paused[i]) return;
 
         if (i == STDIN_FILENO) {
             ok = stream_fd[i] >= 0 && stdin_wr_pos > 0;
@@ -394,7 +404,7 @@ struct CmdInfo {
         } else {
             ok = stream_fd[i] >= 0;
             if (ok && debug > 2)
-                fprintf(stderr, "Pid %d adding stdout checking (fd=%d)\r\n", cmd_pid, stream_fd[i]);
+                fprintf(stderr, "Pid %d adding %s checking (fd=%d)\r\n", cmd_pid, stream_name(i), stream_fd[i]);
             fds = readfds;
         }
 
@@ -408,7 +418,7 @@ struct CmdInfo {
         int     fd  = stream_fd[i];
         fd_set* fds = i == STDIN_FILENO ? writefds : readfds;
 
-        if (fd < 0 || !FD_ISSET(fd, fds)) return;
+        if (fd < 0 || !FD_ISSET(fd, fds) || stream_paused[i]) return;
 
         if (i == STDIN_FILENO)
             process_pid_input(*this);
